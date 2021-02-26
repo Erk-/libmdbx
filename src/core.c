@@ -16187,7 +16187,7 @@ static int mdbx_rebalance(MDBX_cursor *mc) {
 
   /* The threshold of minimum page fill, as a number of free bytes on a page.
    * Pages emptier than this are candidates for merging. */
-  const unsigned room_threshold = page_space(mc->mc_txn->mt_env) * 2 / 3;
+  unsigned room_threshold = page_space(mc->mc_txn->mt_env) * 2 / 3;
 
   const MDBX_page *const tp = mc->mc_pg[mc->mc_top];
   mdbx_debug("rebalancing %s page %" PRIaPGNO " (has %u keys, %.1f%% full)",
@@ -16329,8 +16329,11 @@ static int mdbx_rebalance(MDBX_cursor *mc) {
   const indx_t ki_top = mc->mc_ki[mc->mc_top];
   const indx_t ki_pre_top = mn.mc_ki[pre_top];
   const indx_t nkeys = (indx_t)page_numkeys(mn.mc_pg[mn.mc_top]);
-  if (left && page_room(left) > room_threshold &&
-      (!right || page_room(right) < page_room(left))) {
+
+  const unsigned left_room = left ? page_room(left) : 0;
+  const unsigned right_room = right ? page_room(right) : 0;
+retry:
+  if (left_room > room_threshold && left_room >= right_room) {
     /* try merge with left */
     mdbx_cassert(mc, page_numkeys(left) >= minkeys);
     mn.mc_pg[mn.mc_top] = left;
@@ -16348,7 +16351,7 @@ static int mdbx_rebalance(MDBX_cursor *mc) {
       return rc;
     }
   }
-  if (right && page_room(right) > room_threshold) {
+  if (right_room > room_threshold) {
     /* try merge with right */
     mdbx_cassert(mc, page_numkeys(right) >= minkeys);
     mn.mc_pg[mn.mc_top] = right;
@@ -16362,9 +16365,11 @@ static int mdbx_rebalance(MDBX_cursor *mc) {
       return rc;
     }
   }
-  if (left && page_numkeys(left) > minkeys &&
-      (!right || page_numkeys(right) <= minkeys ||
-       page_room(right) > page_room(left))) {
+
+  const unsigned left_nkeys = left ? page_numkeys(left) : 0;
+  const unsigned right_nkeys = right ? page_numkeys(right) : 0;
+  if (left_nkeys > minkeys &&
+      (right_nkeys <= left_nkeys || right_room >= left_room)) {
     /* try move from left */
     mn.mc_pg[mn.mc_top] = left;
     mn.mc_ki[mn.mc_top - 1] = ki_pre_top - 1;
@@ -16377,7 +16382,7 @@ static int mdbx_rebalance(MDBX_cursor *mc) {
       return rc;
     }
   }
-  if (right && page_numkeys(right) > minkeys) {
+  if (right_nkeys > minkeys) {
     /* try move from right */
     mn.mc_pg[mn.mc_top] = right;
     mn.mc_ki[mn.mc_top - 1] = ki_pre_top + 1;
@@ -16399,37 +16404,9 @@ static int mdbx_rebalance(MDBX_cursor *mc) {
     return MDBX_SUCCESS;
   }
 
-  if (left && (!right || page_room(left) > page_room(right))) {
-    /* try merge with left */
-    mdbx_cassert(mc, page_numkeys(left) >= minkeys);
-    mn.mc_pg[mn.mc_top] = left;
-    mn.mc_ki[mn.mc_top - 1] = ki_pre_top - 1;
-    mn.mc_ki[mn.mc_top] = (indx_t)(page_numkeys(left) - 1);
-    mc->mc_ki[mc->mc_top] = 0;
-    const indx_t new_ki = (indx_t)(ki_top + page_numkeys(left));
-    mn.mc_ki[mn.mc_top] += mc->mc_ki[mn.mc_top] + 1;
-    /* We want mdbx_rebalance to find mn when doing fixups */
-    WITH_CURSOR_TRACKING(mn, rc = mdbx_page_merge(mc, &mn));
-    if (likely(rc != MDBX_RESULT_TRUE)) {
-      cursor_copy_internal(&mn, mc);
-      mc->mc_ki[mc->mc_top] = new_ki;
-      mdbx_cassert(mc, rc || page_numkeys(mc->mc_pg[mc->mc_top]) >= minkeys);
-      return rc;
-    }
-  }
-  if (likely(right)) {
-    /* try merge with right */
-    mdbx_cassert(mc, page_numkeys(right) >= minkeys);
-    mn.mc_pg[mn.mc_top] = right;
-    mn.mc_ki[mn.mc_top - 1] = ki_pre_top + 1;
-    mn.mc_ki[mn.mc_top] = 0;
-    mc->mc_ki[mc->mc_top] = nkeys;
-    WITH_CURSOR_TRACKING(mn, rc = mdbx_page_merge(&mn, mc));
-    if (likely(rc != MDBX_RESULT_TRUE)) {
-      mc->mc_ki[mc->mc_top] = ki_top;
-      mdbx_cassert(mc, rc || page_numkeys(mc->mc_pg[mc->mc_top]) >= minkeys);
-      return rc;
-    }
+  if (likely(room_threshold > 0)) {
+    room_threshold = 0;
+    goto retry;
   }
   return MDBX_PROBLEM;
 }
